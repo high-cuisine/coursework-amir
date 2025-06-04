@@ -145,6 +145,182 @@ router.get('/order/:orderId', authenticateToken, async (req: any, res) => {
   }
 });
 
+// Get all chats for an order
+router.get('/chats/:orderId', authenticateToken, async (req: any, res) => {
+  try {
+    const { orderId } = req.params;
+    console.log('Fetching chats for order:', orderId);
+    console.log('User:', req.user);
+
+    // First, let's check the order details
+    const orderDetails = await pool.query(
+      'SELECT * FROM orders WHERE id = $1',
+      [orderId]
+    );
+
+    if (orderDetails.rows.length === 0) {
+      console.log('Order not found:', orderId);
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const order = orderDetails.rows[0];
+    console.log('Order details:', order);
+
+    // Check if user is authorized to view chats
+    let isAuthorized = false;
+
+    if (req.user.role === 'customer') {
+      // Customer can view chats if they are the order owner
+      isAuthorized = order.customer_id === req.user.userId;
+    } else if (req.user.role === 'freelancer') {
+      // Freelancer can view chats if they are assigned to the order
+      isAuthorized = order.freelancer_id === req.user.userId;
+    }
+
+    if (!isAuthorized) {
+      console.log('Access denied:', { 
+        orderId, 
+        userId: req.user.userId,
+        userRole: req.user.role,
+        orderCustomerId: order.customer_id,
+        orderFreelancerId: order.freelancer_id
+      });
+      return res.status(403).json({ message: 'Not authorized to view chats for this order' });
+    }
+
+    // Get all unique participants in chats for this order
+    const participantsResult = await pool.query(
+      `SELECT DISTINCT 
+        CASE 
+          WHEN m.sender_id = $1 THEN m.receiver_id
+          ELSE m.sender_id
+        END as participant_id,
+        u.username as participant_name,
+        u.role as participant_role,
+        (
+          SELECT COUNT(*)
+          FROM messages m2
+          WHERE m2.order_id = $2
+          AND m2.receiver_id = $1
+          AND m2.sender_id = participant_id
+          AND m2.created_at > (
+            SELECT COALESCE(MAX(created_at), '1970-01-01')
+            FROM messages m3
+            WHERE m3.order_id = $2
+            AND m3.sender_id = $1
+            AND m3.receiver_id = participant_id
+          )
+        ) as unread_count,
+        (
+          SELECT content
+          FROM messages m4
+          WHERE m4.order_id = $2
+          AND (
+            (m4.sender_id = $1 AND m4.receiver_id = participant_id)
+            OR (m4.sender_id = participant_id AND m4.receiver_id = $1)
+          )
+          ORDER BY m4.created_at DESC
+          LIMIT 1
+        ) as last_message,
+        (
+          SELECT created_at
+          FROM messages m5
+          WHERE m5.order_id = $2
+          AND (
+            (m5.sender_id = $1 AND m5.receiver_id = participant_id)
+            OR (m5.sender_id = participant_id AND m5.receiver_id = $1)
+          )
+          ORDER BY m5.created_at DESC
+          LIMIT 1
+        ) as last_message_time
+      FROM messages m
+      JOIN users u ON (
+        CASE 
+          WHEN m.sender_id = $1 THEN m.receiver_id
+          ELSE m.sender_id
+        END = u.id
+      )
+      WHERE m.order_id = $2
+      AND (m.sender_id = $1 OR m.receiver_id = $1)
+      ORDER BY last_message_time DESC NULLS LAST`,
+      [req.user.userId, orderId]
+    );
+
+    console.log('Chats found:', participantsResult.rows.length);
+    res.json(participantsResult.rows);
+  } catch (error) {
+    console.error('Error fetching order chats:', error);
+    res.status(500).json({ message: 'Error fetching order chats' });
+  }
+});
+
+// Get messages between two users for an order
+router.get('/order/:orderId/chat/:participantId', authenticateToken, async (req: any, res) => {
+  try {
+    const { orderId, participantId } = req.params;
+    console.log('Fetching messages for order:', orderId, 'with participant:', participantId);
+    console.log('User:', req.user);
+
+    // First, let's check the order details
+    const orderDetails = await pool.query(
+      'SELECT * FROM orders WHERE id = $1',
+      [orderId]
+    );
+
+    if (orderDetails.rows.length === 0) {
+      console.log('Order not found:', orderId);
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const order = orderDetails.rows[0];
+    console.log('Order details:', order);
+
+    // Check if user is authorized to view messages
+    let isAuthorized = false;
+
+    if (req.user.role === 'customer') {
+      // Customer can view messages if they are the order owner
+      isAuthorized = order.customer_id === req.user.userId;
+    } else if (req.user.role === 'freelancer') {
+      // Freelancer can view messages if they are assigned to the order
+      isAuthorized = order.freelancer_id === req.user.userId;
+    }
+
+    if (!isAuthorized) {
+      console.log('Access denied:', { 
+        orderId, 
+        userId: req.user.userId,
+        userRole: req.user.role,
+        orderCustomerId: order.customer_id,
+        orderFreelancerId: order.freelancer_id
+      });
+      return res.status(403).json({ message: 'Not authorized to view messages for this order' });
+    }
+
+    const result = await pool.query(
+      `SELECT m.*, 
+        u1.username as sender_name,
+        u2.username as receiver_name
+       FROM messages m
+       JOIN users u1 ON m.sender_id = u1.id
+       JOIN users u2 ON m.receiver_id = u2.id
+       WHERE m.order_id = $1
+       AND (
+         (m.sender_id = $2 AND m.receiver_id = $3)
+         OR (m.sender_id = $3 AND m.receiver_id = $2)
+       )
+       ORDER BY m.created_at ASC`,
+      [orderId, req.user.userId, participantId]
+    );
+
+    console.log('Messages found:', result.rows.length);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching order messages:', error);
+    res.status(500).json({ message: 'Error fetching order messages' });
+  }
+});
+
 // Create new message
 router.post('/', authenticateToken, async (req: any, res) => {
   try {
